@@ -4,6 +4,7 @@
 pub mod pci;
 
 use alloc::boxed::Box;
+use alloc::collections::vec_deque::VecDeque;
 use alloc::vec::Vec;
 use core::mem;
 
@@ -11,7 +12,7 @@ use pci_types::InterruptLine;
 use virtio::FeatureBits;
 use virtio::vsock::Hdr;
 
-use super::virtio::virtqueue::VirtQueue;
+use super::virtio::virtqueue::{Serde, VirtQueue};
 use crate::config::VIRTIO_MAX_QUEUE_SIZE;
 use crate::drivers::Driver;
 use crate::drivers::virtio::error::VirtioVsockError;
@@ -25,13 +26,49 @@ use crate::drivers::virtio::virtqueue::{
 use crate::drivers::vsock::pci::VsockDevCfgRaw;
 use crate::mm::device_alloc::DeviceAlloc;
 
+struct VirtioPacket {
+	virtio_hdr: Box<Hdr, DeviceAlloc>,
+	packet: Vec<u8, DeviceAlloc>,
+}
+
+impl Serde for VirtioPacket {
+	type Metadata = ();
+
+	fn required_len() -> u32 {
+		u32::try_from(size_of::<Hdr>()).unwrap()
+	}
+
+	fn deserialize(
+		elems: &mut VecDeque<BufferElem>,
+		remaining: &mut u32,
+		_metadata: &(),
+	) -> Option<Self> {
+		// Deserialize the header
+		let BufferElem(buf) = elems.pop_front()?;
+		*remaining -= Self::required_len();
+
+		// SAFETY: Management of the memory is transferred from the Vec to the Box
+		// Both heap allocations were made with the same alloc: DeviceAlloc
+		// The alignment matches because it is only allowed to deserialize things that were serialized before.
+		let virtio_hdr = unsafe { Box::from_raw_in(buf.into_raw_parts().0.cast(), DeviceAlloc) };
+
+		// Deserialize the packet
+		let BufferElem(mut packet) = elems.pop_front()?;
+		let new_len = u32::min(packet.capacity().try_into().unwrap(), *remaining);
+		*remaining -= new_len;
+		unsafe { packet.set_len(new_len.try_into().unwrap()) };
+
+		Some(Self { virtio_hdr, packet })
+	}
+}
+
 fn fill_queue(vq: &mut VirtQueue, num_packets: u16, packet_size: u32) {
 	for _ in 0..num_packets {
 		let buff_tkn = match AvailBufferToken::new(
 			vec![],
 			vec![
-				BufferElem::Sized(Box::<Hdr, _>::new_uninit_in(DeviceAlloc)),
-				BufferElem::Vector(Vec::with_capacity_in(
+				BufferElem::new_uninit::<Hdr>(),
+				BufferElem(Vec::with_capacity_in(
 					packet_size.try_into().unwrap(),
 					DeviceAlloc,
 				)),
@@ -98,14 +135,13 @@ impl RxQueue {
 		F: FnMut(&Hdr, &[u8]),
 	{
 		while let Some(mut buffer_tkn) = self.get_next() {
-			let header = buffer_tkn
+			let virtio_packet = buffer_tkn
 				.used_recv_buff
-				.pop_front_downcast::<Hdr>()
+				.pop_front::<VirtioPacket>(&())
 				.unwrap();
-			let packet = buffer_tkn.used_recv_buff.pop_front_vec().unwrap();
 
 			if let Some(ref mut vq) = self.vq {
-				f(&header, &packet[..]);
+				f(&virtio_packet.virtio_hdr, &virtio_packet.packet[..]);
 
 				fill_queue(vq, 1, self.packet_size);
 			} else {
@@ -171,7 +207,7 @@ impl TxQueue {
 				result
 			};
 
-			let buff_tkn = AvailBufferToken::new(vec![BufferElem::Vector(packet)], vec![]).unwrap();
+			let buff_tkn = AvailBufferToken::new(vec![BufferElem(packet)], vec![]).unwrap();
 
 			vq.dispatch(buff_tkn, false, BufferType::Direct).unwrap();
 

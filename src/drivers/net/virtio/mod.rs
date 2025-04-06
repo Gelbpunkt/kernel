@@ -11,6 +11,7 @@ cfg_if::cfg_if! {
 }
 
 use alloc::boxed::Box;
+use alloc::collections::vec_deque::VecDeque;
 use alloc::vec::Vec;
 
 use smoltcp::phy::{Checksum, ChecksumCapabilities};
@@ -31,11 +32,48 @@ use crate::drivers::virtio::transport::pci::{ComCfg, IsrStatus, NotifCfg};
 use crate::drivers::virtio::virtqueue::packed::PackedVq;
 use crate::drivers::virtio::virtqueue::split::SplitVq;
 use crate::drivers::virtio::virtqueue::{
-	AvailBufferToken, BufferElem, BufferType, UsedBufferToken, VirtQueue, Virtq, VqIndex, VqSize,
+	AvailBufferToken, BufferElem, BufferType, Serde, UsedBufferToken, VirtQueue, Virtq, VqIndex,
+	VqSize,
 };
 use crate::drivers::{Driver, InterruptLine};
 use crate::executor::device::{RxToken, TxToken};
 use crate::mm::device_alloc::DeviceAlloc;
+
+struct VirtioPacket {
+	virtio_hdr: Box<Hdr, DeviceAlloc>,
+	packet: Vec<u8, DeviceAlloc>,
+}
+
+impl Serde for VirtioPacket {
+	type Metadata = ();
+
+	fn required_len() -> u32 {
+		u32::try_from(size_of::<Hdr>()).unwrap()
+	}
+
+	fn deserialize(
+		elems: &mut VecDeque<BufferElem>,
+		remaining: &mut u32,
+		_metadata: &(),
+	) -> Option<Self> {
+		// Deserialize the header
+		let BufferElem(buf) = elems.pop_front()?;
+		*remaining -= Self::required_len();
+
+		// SAFETY: Management of the memory is transferred from the Vec to the Box
+		// Both heap allocations were made with the same alloc: DeviceAlloc
+		// The alignment matches because it is only allowed to deserialize things that were serialized before.
+		let virtio_hdr = unsafe { Box::from_raw_in(buf.into_raw_parts().0.cast(), DeviceAlloc) };
+
+		// Deserialize the packet
+		let BufferElem(mut packet) = elems.pop_front()?;
+		let new_len = u32::min(packet.capacity().try_into().unwrap(), *remaining);
+		*remaining -= new_len;
+		unsafe { packet.set_len(new_len.try_into().unwrap()) };
+
+		Some(Self { virtio_hdr, packet })
+	}
+}
 
 /// A wrapper struct for the raw configuration structure.
 /// Handling the right access to fields, as some are read-only
@@ -116,8 +154,8 @@ fn fill_queue(vq: &mut VirtQueue, num_packets: u16, packet_size: u32) {
 		let buff_tkn = match AvailBufferToken::new(
 			vec![],
 			vec![
-				BufferElem::Sized(Box::<Hdr, _>::new_uninit_in(DeviceAlloc)),
-				BufferElem::Vector(Vec::with_capacity_in(
+				BufferElem::new_uninit::<Hdr>(),
+				BufferElem(Vec::with_capacity_in(
 					packet_size.try_into().unwrap(),
 					DeviceAlloc,
 				)),
@@ -256,7 +294,7 @@ impl NetworkDriver for VirtioNetDriver {
 			result
 		};
 
-		let mut header = Box::new_in(<Hdr as Default>::default(), DeviceAlloc);
+		let mut header = Hdr::default();
 		// If a checksum isn't necessary, we have inform the host within the header
 		// see Virtio specification 5.1.6.2
 		if !self.checksums.tcp.tx() || !self.checksums.udp.tx() {
@@ -291,11 +329,9 @@ impl NetworkDriver for VirtioNetDriver {
 			.into();
 		}
 
-		let buff_tkn = AvailBufferToken::new(
-			vec![BufferElem::Sized(header), BufferElem::Vector(packet)],
-			vec![],
-		)
-		.unwrap();
+		let buff_tkn =
+			AvailBufferToken::new(vec![BufferElem::from(header), BufferElem(packet)], vec![])
+				.unwrap();
 
 		self.send_vqs.vqs[0]
 			.dispatch(buff_tkn, false, BufferType::Direct)
@@ -310,26 +346,24 @@ impl NetworkDriver for VirtioNetDriver {
 			RxQueues::post_processing(&mut buffer_tkn)
 				.inspect_err(|vnet_err| warn!("Post processing failed. Err: {vnet_err:?}"))
 				.ok()?;
-			let header = buffer_tkn.used_recv_buff.pop_front_downcast::<Hdr>()?;
-			let packet = buffer_tkn.used_recv_buff.pop_front_vec()?;
-			Some((header, packet))
+			buffer_tkn.used_recv_buff.pop_front::<VirtioPacket>(&())
 		};
 
-		let (first_header, first_packet) = receive_single_packet()?;
+		let first_virtio_packet = receive_single_packet()?;
 
 		// According to VIRTIO spec v1.2 sec. 5.1.6.3.2, "num_buffers will always be 1 if VIRTIO_NET_F_MRG_RXBUF is not negotiated."
 		// Unfortunately, NVIDIA MLX5 does not comply with this requirement and we have to manually set the value to the correct one.
 		let num_buffers = if self.dev_cfg.features.contains(virtio::net::F::MRG_RXBUF) {
-			first_header.num_buffers.to_ne()
+			first_virtio_packet.virtio_hdr.num_buffers.to_ne()
 		} else {
 			1
 		};
 
-		let mut combined_packets = first_packet;
+		let mut combined_packets = first_virtio_packet.packet;
 
 		for _ in 1..num_buffers {
-			let (_header, packet) = receive_single_packet()?;
-			combined_packets.extend_from_slice(&packet);
+			let first_virtio_packet = receive_single_packet()?;
+			combined_packets.extend_from_slice(&first_virtio_packet.packet);
 		}
 
 		fill_queue(

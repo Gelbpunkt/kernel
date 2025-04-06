@@ -1,4 +1,5 @@
 use alloc::boxed::Box;
+use alloc::collections::vec_deque::VecDeque;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::str;
@@ -8,6 +9,7 @@ use virtio::FeatureBits;
 use virtio::fs::ConfigVolatileFieldAccess;
 use volatile::VolatileRef;
 use volatile::access::ReadOnly;
+use zerocopy::{FromBytes, Immutable, IntoBytes};
 
 use crate::config::VIRTIO_MAX_QUEUE_SIZE;
 use crate::drivers::Driver;
@@ -19,10 +21,54 @@ use crate::drivers::virtio::transport::pci::{ComCfg, IsrStatus, NotifCfg};
 use crate::drivers::virtio::virtqueue::error::VirtqError;
 use crate::drivers::virtio::virtqueue::split::SplitVq;
 use crate::drivers::virtio::virtqueue::{
-	AvailBufferToken, BufferElem, BufferType, VirtQueue, Virtq, VqIndex, VqSize,
+	AvailBufferToken, BufferElem, BufferType, Serde, VirtQueue, Virtq, VqIndex, VqSize,
 };
 use crate::fs::fuse::{self, FuseInterface, Rsp, RspHeader};
 use crate::mm::device_alloc::DeviceAlloc;
+
+struct VirtioPacket<O: fuse::ops::Op> {
+	virtio_hdr: Box<RspHeader<O>, DeviceAlloc>,
+	packet: Option<Vec<u8, DeviceAlloc>>,
+}
+
+impl<O> Serde for VirtioPacket<O>
+where
+	O: fuse::ops::Op,
+{
+	type Metadata = u32;
+
+	fn required_len() -> u32 {
+		u32::try_from(size_of::<RspHeader<O>>()).unwrap()
+	}
+
+	fn deserialize(
+		elems: &mut VecDeque<BufferElem>,
+		remaining: &mut u32,
+		rsp_payload_len: &u32,
+	) -> Option<Self> {
+		// Deserialize the header
+		let BufferElem(buf) = elems.pop_front()?;
+		*remaining -= Self::required_len();
+
+		// SAFETY: Management of the memory is transferred from the Vec to the Box
+		// Both heap allocations were made with the same alloc: DeviceAlloc
+		// The alignment matches because it is only allowed to deserialize things that were serialized before.
+		let virtio_hdr = unsafe { Box::from_raw_in(buf.into_raw_parts().0.cast(), DeviceAlloc) };
+
+		// Deserialize the packet, if there is one
+		let packet = if *rsp_payload_len == 0 {
+			None
+		} else {
+			let BufferElem(mut packet) = elems.pop_front()?;
+			let new_len = u32::min(packet.capacity().try_into().unwrap(), *remaining);
+			*remaining -= new_len;
+			unsafe { packet.set_len(new_len.try_into().unwrap()) };
+			Some(packet)
+		};
+
+		Some(Self { virtio_hdr, packet })
+	}
+}
 
 /// A wrapper struct for the raw configuration structure.
 /// Handling the right access to fields, as some are read-only
@@ -160,40 +206,41 @@ impl FuseInterface for VirtioFsDriver {
 		rsp_payload_len: u32,
 	) -> Result<fuse::Rsp<O>, VirtqError>
 	where
-		<O as fuse::ops::Op>::InStruct: Send,
-		<O as fuse::ops::Op>::OutStruct: Send,
+		<O as fuse::ops::Op>::InStruct: Send + IntoBytes + Immutable,
+		<O as fuse::ops::Op>::OutStruct: Send + FromBytes,
 	{
 		let fuse::Cmd {
 			headers: cmd_headers,
 			payload: cmd_payload_opt,
 		} = cmd;
 		let send = if let Some(cmd_payload) = cmd_payload_opt {
-			vec![
-				BufferElem::Sized(cmd_headers),
-				BufferElem::Vector(cmd_payload),
-			]
+			vec![BufferElem::from(cmd_headers), BufferElem(cmd_payload)]
 		} else {
-			vec![BufferElem::Sized(cmd_headers)]
+			vec![BufferElem::from(cmd_headers)]
 		};
 
-		let rsp_headers = Box::<RspHeader<O>, _>::new_uninit_in(DeviceAlloc);
 		let recv = if rsp_payload_len == 0 {
-			vec![BufferElem::Sized(rsp_headers)]
+			vec![BufferElem::new_uninit::<RspHeader<O>>()]
 		} else {
 			let rsp_payload = Vec::with_capacity_in(rsp_payload_len as usize, DeviceAlloc);
 			vec![
-				BufferElem::Sized(rsp_headers),
-				BufferElem::Vector(rsp_payload),
+				BufferElem::new_uninit::<RspHeader<O>>(),
+				BufferElem(rsp_payload),
 			]
 		};
 
 		let buffer_tkn = AvailBufferToken::new(send, recv).unwrap();
 		let mut transfer_result =
 			self.vqueues[1].dispatch_blocking(buffer_tkn, BufferType::Direct)?;
+		let virtio_packet = transfer_result
+			.used_recv_buff
+			.pop_front::<VirtioPacket<O>>(&rsp_payload_len)
+			.unwrap();
 
-		let headers = transfer_result.used_recv_buff.pop_front_downcast().unwrap();
-		let payload = transfer_result.used_recv_buff.pop_front_vec();
-		Ok(Rsp { headers, payload })
+		Ok(Rsp {
+			headers: virtio_packet.virtio_hdr,
+			payload: virtio_packet.packet,
+		})
 	}
 
 	fn get_mount_point(&self) -> String {
