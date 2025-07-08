@@ -11,11 +11,32 @@ use cfg_if::cfg_if;
 use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint};
 
 use crate::errno::*;
-#[cfg(any(feature = "tcp", feature = "udp"))]
+#[cfg(all(
+	any(feature = "tcp", feature = "udp"),
+	any(
+		feature = "virtio-net",
+		all(target_arch = "riscv64", feature = "gem-net"),
+		all(target_arch = "x86_64", feature = "rtl8139"),
+	)
+))]
 use crate::executor::network::{NIC, NetworkState};
-#[cfg(feature = "tcp")]
+#[cfg(all(
+	feature = "tcp",
+	any(
+		feature = "virtio-net",
+		all(target_arch = "riscv64", feature = "gem-net"),
+		all(target_arch = "x86_64", feature = "rtl8139"),
+	)
+))]
 use crate::fd::socket::tcp;
-#[cfg(feature = "udp")]
+#[cfg(all(
+	feature = "udp",
+	any(
+		feature = "virtio-net",
+		all(target_arch = "riscv64", feature = "gem-net"),
+		all(target_arch = "x86_64", feature = "rtl8139"),
+	)
+))]
 use crate::fd::socket::udp;
 #[cfg(feature = "vsock")]
 use crate::fd::socket::vsock::{self, VsockEndpoint, VsockListenEndpoint};
@@ -433,7 +454,14 @@ pub extern "C" fn sys_socket(domain: i32, type_: SockType, protocol: i32) -> i32
 		return fd;
 	}
 
-	#[cfg(any(feature = "tcp", feature = "udp"))]
+	#[cfg(all(
+		any(feature = "tcp", feature = "udp"),
+		any(
+			feature = "virtio-net",
+			all(target_arch = "riscv64", feature = "gem-net"),
+			all(target_arch = "x86_64", feature = "rtl8139"),
+		)
+	))]
 	if (domain == AF_INET || domain == AF_INET6)
 		&& type_.intersects(SockType::SOCK_STREAM | SockType::SOCK_DGRAM)
 	{
@@ -484,9 +512,26 @@ pub unsafe extern "C" fn sys_accept(fd: i32, addr: *mut sockaddr, addrlen: *mut 
 		|v| {
 			block_on((*v).accept(), None).map_or_else(
 				|e| -i32::from(e),
-				#[cfg_attr(not(any(feature = "tcp", feature = "udp")), expect(unused_variables))]
+				#[cfg_attr(
+					not(all(
+						any(feature = "tcp", feature = "udp"),
+						any(
+							feature = "virtio-net",
+							all(target_arch = "riscv64", feature = "gem-net"),
+							all(target_arch = "x86_64", feature = "rtl8139"),
+						)
+					)),
+					expect(unused_variables)
+				)]
 				|(obj, endpoint)| match endpoint {
-					#[cfg(any(feature = "tcp", feature = "udp"))]
+					#[cfg(all(
+						any(feature = "tcp", feature = "udp"),
+						any(
+							feature = "virtio-net",
+							all(target_arch = "riscv64", feature = "gem-net"),
+							all(target_arch = "x86_64", feature = "rtl8139"),
+						)
+					))]
 					Endpoint::Ip(endpoint) => {
 						let new_fd = insert_object(obj).unwrap();
 
@@ -560,7 +605,14 @@ pub unsafe extern "C" fn sys_bind(fd: i32, name: *const sockaddr, namelen: sockl
 	obj.map_or_else(
 		|e| -i32::from(e),
 		|v| match family {
-			#[cfg(any(feature = "tcp", feature = "udp"))]
+			#[cfg(all(
+				any(feature = "tcp", feature = "udp"),
+				any(
+					feature = "virtio-net",
+					all(target_arch = "riscv64", feature = "gem-net"),
+					all(target_arch = "x86_64", feature = "rtl8139"),
+				)
+			))]
 			AF_INET => {
 				if namelen < u32::try_from(size_of::<sockaddr_in>()).unwrap() {
 					return -crate::errno::EINVAL;
@@ -569,7 +621,14 @@ pub unsafe extern "C" fn sys_bind(fd: i32, name: *const sockaddr, namelen: sockl
 				block_on((*v).bind(ListenEndpoint::Ip(endpoint)), None)
 					.map_or_else(|e| -i32::from(e), |()| 0)
 			}
-			#[cfg(any(feature = "tcp", feature = "udp"))]
+			#[cfg(all(
+				any(feature = "tcp", feature = "udp"),
+				any(
+					feature = "virtio-net",
+					all(target_arch = "riscv64", feature = "gem-net"),
+					all(target_arch = "x86_64", feature = "rtl8139"),
+				)
+			))]
 			AF_INET6 => {
 				if namelen < u32::try_from(size_of::<sockaddr_in6>()).unwrap() {
 					return -crate::errno::EINVAL;
@@ -602,14 +661,28 @@ pub unsafe extern "C" fn sys_connect(fd: i32, name: *const sockaddr, namelen: so
 	let sa_family = unsafe { i32::from((*name).sa_family) };
 
 	let endpoint = match sa_family {
-		#[cfg(any(feature = "tcp", feature = "udp"))]
+		#[cfg(all(
+			any(feature = "tcp", feature = "udp"),
+			any(
+				feature = "virtio-net",
+				all(target_arch = "riscv64", feature = "gem-net"),
+				all(target_arch = "x86_64", feature = "rtl8139"),
+			)
+		))]
 		AF_INET => {
 			if namelen < u32::try_from(size_of::<sockaddr_in>()).unwrap() {
 				return -crate::errno::EINVAL;
 			}
 			Endpoint::Ip(IpEndpoint::from(unsafe { *name.cast::<sockaddr_in>() }))
 		}
-		#[cfg(any(feature = "tcp", feature = "udp"))]
+		#[cfg(all(
+			any(feature = "tcp", feature = "udp"),
+			any(
+				feature = "virtio-net",
+				all(target_arch = "riscv64", feature = "gem-net"),
+				all(target_arch = "x86_64", feature = "rtl8139"),
+			)
+		))]
 		AF_INET6 => {
 			if namelen < u32::try_from(size_of::<sockaddr_in6>()).unwrap() {
 				return -crate::errno::EINVAL;
@@ -651,7 +724,14 @@ pub unsafe extern "C" fn sys_getsockname(
 					let addrlen = unsafe { &mut *addrlen };
 
 					match endpoint {
-						#[cfg(any(feature = "tcp", feature = "udp"))]
+						#[cfg(all(
+							any(feature = "tcp", feature = "udp"),
+							any(
+								feature = "virtio-net",
+								all(target_arch = "riscv64", feature = "gem-net"),
+								all(target_arch = "x86_64", feature = "rtl8139"),
+							)
+						))]
 						Endpoint::Ip(endpoint) => match endpoint.addr {
 							IpAddress::Ipv4(_) => {
 								if *addrlen >= u32::try_from(size_of::<sockaddr_in>()).unwrap() {
@@ -790,7 +870,14 @@ pub unsafe extern "C" fn sys_getpeername(
 					let addrlen = unsafe { &mut *addrlen };
 
 					match endpoint {
-						#[cfg(any(feature = "tcp", feature = "udp"))]
+						#[cfg(all(
+							any(feature = "tcp", feature = "udp"),
+							any(
+								feature = "virtio-net",
+								all(target_arch = "riscv64", feature = "gem-net"),
+								all(target_arch = "x86_64", feature = "rtl8139"),
+							)
+						))]
 						Endpoint::Ip(endpoint) => match endpoint.addr {
 							IpAddress::Ipv4(_) => {
 								if *addrlen >= u32::try_from(size_of::<sockaddr_in>()).unwrap() {
@@ -895,6 +982,17 @@ pub unsafe extern "C" fn sys_sendto(
 	addr: *const sockaddr,
 	addr_len: socklen_t,
 ) -> isize {
+	#[cfg_attr(
+		not(all(
+			any(feature = "tcp", feature = "udp"),
+			any(
+				feature = "virtio-net",
+				all(target_arch = "riscv64", feature = "gem-net"),
+				all(target_arch = "x86_64", feature = "rtl8139"),
+			)
+		)),
+		allow(clippy::needless_late_init)
+	)]
 	let endpoint;
 
 	if addr.is_null() || addr_len == 0 {
@@ -902,7 +1000,14 @@ pub unsafe extern "C" fn sys_sendto(
 	}
 
 	cfg_if! {
-		if #[cfg(any(feature = "tcp", feature = "udp"))] {
+		if #[cfg(all(
+			any(feature = "tcp", feature = "udp"),
+			any(
+				feature = "virtio-net",
+				all(target_arch = "riscv64", feature = "gem-net"),
+				all(target_arch = "x86_64", feature = "rtl8139"),
+			)
+		))] {
 			let sa_family = unsafe { i32::from((*addr).sa_family) };
 
 			if sa_family == AF_INET {
@@ -966,7 +1071,14 @@ pub unsafe extern "C" fn sys_recvfrom(
 						let addrlen = unsafe { &mut *addrlen };
 
 						match endpoint {
-							#[cfg(any(feature = "tcp", feature = "udp"))]
+							#[cfg(all(
+								any(feature = "tcp", feature = "udp"),
+								any(
+									feature = "virtio-net",
+									all(target_arch = "riscv64", feature = "gem-net"),
+									all(target_arch = "x86_64", feature = "rtl8139"),
+								)
+							))]
 							Endpoint::Ip(endpoint) => match endpoint.addr {
 								IpAddress::Ipv4(_) => {
 									if *addrlen >= u32::try_from(size_of::<sockaddr_in>()).unwrap()

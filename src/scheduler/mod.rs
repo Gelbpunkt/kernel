@@ -99,7 +99,14 @@ pub(crate) trait PerCoreSchedulerExt {
 	/// Interrupt flag will be cleared during the reschedule
 	fn reschedule(self);
 
-	#[cfg(any(feature = "tcp", feature = "udp"))]
+	#[cfg(all(
+		any(feature = "tcp", feature = "udp"),
+		any(
+			feature = "virtio-net",
+			all(target_arch = "riscv64", feature = "gem-net"),
+			all(target_arch = "x86_64", feature = "rtl8139"),
+		)
+	))]
 	fn add_network_timer(self, wakeup_time: Option<u64>);
 
 	/// Terminate the current task on the current core.
@@ -173,7 +180,14 @@ impl PerCoreSchedulerExt for &mut PerCoreScheduler {
 		without_interrupts(|| self.scheduler());
 	}
 
-	#[cfg(any(feature = "tcp", feature = "udp"))]
+	#[cfg(all(
+		any(feature = "tcp", feature = "udp"),
+		any(
+			feature = "virtio-net",
+			all(target_arch = "riscv64", feature = "gem-net"),
+			all(target_arch = "x86_64", feature = "rtl8139"),
+		)
+	))]
 	fn add_network_timer(self, wakeup_time: Option<u64>) {
 		without_interrupts(|| {
 			self.blocked_tasks.add_network_timer(wakeup_time);

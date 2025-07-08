@@ -7,7 +7,14 @@ use core::task::Poll::{Pending, Ready};
 use core::time::Duration;
 
 use async_trait::async_trait;
-#[cfg(any(feature = "tcp", feature = "udp"))]
+#[cfg(all(
+	any(feature = "tcp", feature = "udp"),
+	any(
+		feature = "virtio-net",
+		all(target_arch = "riscv64", feature = "gem-net"),
+		all(target_arch = "x86_64", feature = "rtl8139"),
+	)
+))]
 use smoltcp::wire::{IpEndpoint, IpListenEndpoint};
 
 use crate::arch::kernel::core_local::core_scheduler;
@@ -16,7 +23,17 @@ use crate::fs::{DirectoryEntry, FileAttr, SeekWhence};
 use crate::io;
 
 mod eventfd;
-#[cfg(any(feature = "tcp", feature = "udp", feature = "vsock"))]
+#[cfg(any(
+	all(
+		any(feature = "tcp", feature = "udp"),
+		any(
+			feature = "virtio-net",
+			all(target_arch = "riscv64", feature = "gem-net"),
+			all(target_arch = "x86_64", feature = "rtl8139"),
+		)
+	),
+	feature = "vsock"
+))]
 pub(crate) mod socket;
 pub(crate) mod stdio;
 
@@ -24,10 +41,27 @@ pub(crate) const STDIN_FILENO: FileDescriptor = 0;
 pub(crate) const STDOUT_FILENO: FileDescriptor = 1;
 pub(crate) const STDERR_FILENO: FileDescriptor = 2;
 
-#[cfg(any(feature = "tcp", feature = "udp", feature = "vsock"))]
+#[cfg(any(
+	all(
+		any(feature = "tcp", feature = "udp"),
+		any(
+			feature = "virtio-net",
+			all(target_arch = "riscv64", feature = "gem-net"),
+			all(target_arch = "x86_64", feature = "rtl8139"),
+		)
+	),
+	feature = "vsock"
+))]
 #[derive(Debug)]
 pub(crate) enum Endpoint {
-	#[cfg(any(feature = "tcp", feature = "udp"))]
+	#[cfg(all(
+		any(feature = "tcp", feature = "udp"),
+		any(
+			feature = "virtio-net",
+			all(target_arch = "riscv64", feature = "gem-net"),
+			all(target_arch = "x86_64", feature = "rtl8139"),
+		)
+	))]
 	Ip(IpEndpoint),
 	#[cfg(feature = "vsock")]
 	Vsock(socket::vsock::VsockEndpoint),
@@ -36,7 +70,14 @@ pub(crate) enum Endpoint {
 #[cfg(any(feature = "tcp", feature = "udp", feature = "vsock"))]
 #[derive(Debug)]
 pub(crate) enum ListenEndpoint {
-	#[cfg(any(feature = "tcp", feature = "udp"))]
+	#[cfg(all(
+		any(feature = "tcp", feature = "udp"),
+		any(
+			feature = "virtio-net",
+			all(target_arch = "riscv64", feature = "gem-net"),
+			all(target_arch = "x86_64", feature = "rtl8139"),
+		)
+	))]
 	Ip(IpListenEndpoint),
 	#[cfg(feature = "vsock")]
 	Vsock(socket::vsock::VsockListenEndpoint),

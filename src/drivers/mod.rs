@@ -4,7 +4,14 @@
 pub mod fs;
 #[cfg(not(feature = "pci"))]
 pub mod mmio;
-#[cfg(any(feature = "tcp", feature = "udp"))]
+#[cfg(all(
+	any(feature = "tcp", feature = "udp"),
+	any(
+		feature = "virtio-net",
+		all(target_arch = "riscv64", feature = "gem-net"),
+		all(target_arch = "x86_64", feature = "rtl8139"),
+	)
+))]
 pub mod net;
 #[cfg(feature = "pci")]
 pub mod pci;

@@ -12,7 +12,14 @@ pub(crate) const USER_STACK_SIZE: usize = 0x0010_0000;
 pub(crate) const VIRTIO_MAX_QUEUE_SIZE: u16 = if cfg!(feature = "pci") { 2048 } else { 1024 };
 
 /// Default keep alive interval in milliseconds
-#[cfg(feature = "tcp")]
+#[cfg(all(
+	feature = "tcp",
+	any(
+		feature = "virtio-net",
+		all(target_arch = "riscv64", feature = "gem-net"),
+		all(target_arch = "x86_64", feature = "rtl8139"),
+	)
+))]
 pub(crate) const DEFAULT_KEEP_ALIVE_INTERVAL: u64 = 75000;
 
 #[cfg(feature = "vsock")]
