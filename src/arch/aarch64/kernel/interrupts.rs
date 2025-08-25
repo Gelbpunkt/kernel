@@ -23,6 +23,7 @@ use crate::drivers::mmio::get_interrupt_handlers;
 #[cfg(feature = "pci")]
 use crate::drivers::pci::get_interrupt_handlers;
 use crate::drivers::{InterruptHandlerQueue, InterruptLine};
+use crate::kernel::serial::handle_uart_interrupt;
 use crate::mm::virtualmem::KERNEL_FREE_LIST;
 use crate::scheduler::{self, CoreId};
 use crate::{core_id, core_scheduler, env};
@@ -37,6 +38,8 @@ pub(crate) const SGI_RESCHED: u8 = 1;
 
 /// Number of the timer interrupt
 static mut TIMER_INTERRUPT: u32 = 0;
+/// Number of the UART interrupt
+static mut UART_INTERRUPT: u32 = 0;
 /// Possible interrupt handlers
 static INTERRUPT_HANDLERS: OnceCell<HashMap<u8, InterruptHandlerQueue, RandomState>> =
 	OnceCell::new();
@@ -109,6 +112,15 @@ pub(crate) fn install_handlers() {
 			let mut queue = VecDeque::<fn()>::new();
 			queue.push_back(timer_handler);
 			handlers.insert(u8::try_from(TIMER_INTERRUPT).unwrap() + PPI_START, queue);
+		}
+
+		if let Some(queue) = handlers.get_mut(&(u8::try_from(UART_INTERRUPT).unwrap() + SPI_START))
+		{
+			queue.push_back(handle_uart_interrupt);
+		} else {
+			let mut queue = VecDeque::<fn()>::new();
+			queue.push_back(handle_uart_interrupt);
+			handlers.insert(u8::try_from(UART_INTERRUPT).unwrap() + SPI_START, queue);
 		}
 	}
 
@@ -350,10 +362,12 @@ pub(crate) fn init() {
 
 	for node in dtb.enum_subnodes("/") {
 		let parts: Vec<_> = node.split('@').collect();
+		let Some(compatible) = dtb.get_property(parts.first().unwrap(), "compatible") else {
+			continue;
+		};
+		let compatible = core::str::from_utf8(compatible).unwrap();
 
-		if let Some(compatible) = dtb.get_property(parts.first().unwrap(), "compatible")
-			&& core::str::from_utf8(compatible).unwrap().contains("timer")
-		{
+		if compatible.contains("timer") {
 			let irq_slice = dtb
 				.get_property(parts.first().unwrap(), "interrupts")
 				.unwrap();
@@ -395,6 +409,47 @@ pub(crate) fn init() {
 				panic!("Invalid interrupt level!");
 			}
 			gic.enable_interrupt(timer_irqid, Some(cpu_id), true);
+		} else if compatible.contains("pl011") {
+			let irq_slice = dtb
+				.get_property(parts.first().unwrap(), "interrupts")
+				.unwrap();
+
+			let (irqtype, irq_slice) = irq_slice.split_at(4);
+			let (irq, irq_slice) = irq_slice.split_at(4);
+			let (irqflags, _) = irq_slice.split_at(4);
+
+			let irqtype = u32::from_be_bytes(irqtype.try_into().unwrap());
+			let irq = u32::from_be_bytes(irq.try_into().unwrap());
+			let irqflags = u32::from_be_bytes(irqflags.try_into().unwrap());
+
+			unsafe {
+				UART_INTERRUPT = irq;
+			}
+
+			debug!("UART interrupt: {irq}, type {irqtype}, flags {irqflags}");
+
+			let uart_irqid = if irqtype == 1 {
+				IntId::ppi(irq)
+			} else if irqtype == 0 {
+				IntId::spi(irq)
+			} else {
+				panic!("Invalid interrupt type");
+			};
+
+			gic.set_interrupt_priority(uart_irqid, Some(cpu_id), 0x00);
+			if (irqflags & 0xf) == 4 || (irqflags & 0xf) == 8 {
+				gic.set_trigger(uart_irqid, Some(cpu_id), Trigger::Level);
+			} else if (irqflags & 0xf) == 2 || (irqflags & 0xf) == 1 {
+				gic.set_trigger(uart_irqid, Some(cpu_id), Trigger::Edge);
+			} else {
+				panic!("Invalid interrupt level!");
+			}
+
+			gic.enable_interrupt(uart_irqid, Some(cpu_id), true);
+
+			IRQ_NAMES
+				.lock()
+				.insert(u8::try_from(irq).unwrap() + SPI_START, "UART");
 		}
 	}
 
