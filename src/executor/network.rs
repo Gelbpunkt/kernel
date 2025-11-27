@@ -26,7 +26,7 @@ use crate::arch;
 use crate::drivers::net::{NetworkDevice, NetworkDriver};
 #[cfg(feature = "dns")]
 use crate::errno::Errno;
-use crate::executor::spawn;
+use crate::executor::{WakerRegistration, spawn};
 #[cfg(feature = "dns")]
 use crate::io;
 use crate::scheduler::PerCoreSchedulerExt;
@@ -194,10 +194,25 @@ async fn network_run() {
 		if let Some(mut guard) = NIC.try_lock() {
 			match &mut *guard {
 				NetworkState::Initialized(nic) => {
-					nic.poll_common(now());
-					// FIXME: only wake when progress can be made
-					cx.waker().wake_by_ref();
-					Poll::Pending
+					let ts = now();
+					let poll_res = nic.poll_common(ts);
+
+					match poll_res {
+						PollResult::SocketStateChanged => {
+							// Progress can be made, poll again ASAP
+							cx.waker().wake_by_ref();
+							Poll::Pending
+						}
+						PollResult::None => {
+							// Nothing to do immediately
+							NETWORK_WAKER.lock().register(cx.waker());
+							let wakeup_time = nic.poll_delay(ts).map(|d| {
+								crate::arch::processor::get_timer_ticks() + d.total_micros()
+							});
+							crate::core_scheduler().add_network_timer(wakeup_time);
+							Poll::Pending
+						}
+					}
 				}
 				_ => Poll::Ready(()),
 			}
@@ -293,6 +308,7 @@ impl<'a> NetworkInterface<'a> {
 	}
 
 	pub(crate) fn poll_common(&mut self, timestamp: Instant) -> PollResult {
+		// FIXME: poll can DOS
 		self.iface
 			.poll(timestamp, &mut self.device, &mut self.sockets)
 	}
@@ -356,3 +372,6 @@ impl<'a> NetworkInterface<'a> {
 		self.device.set_polling_mode(value);
 	}
 }
+
+pub(crate) static NETWORK_WAKER: InterruptTicketMutex<WakerRegistration> =
+	InterruptTicketMutex::new(WakerRegistration::new());
